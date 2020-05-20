@@ -30,3 +30,12 @@
 *.exe
 *.out
 *.app
+
+
+# cmakefile
+./vscode
+./build
+build/
+3rdparty/
+data/
+.vscode/
