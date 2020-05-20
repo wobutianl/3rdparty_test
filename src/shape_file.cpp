@@ -16,6 +16,7 @@
 #include "geos/operation/buffer/BufferOp.h"
 #include "geos/operation/buffer/BufferParameters.h"
 #include "geos/algorithm/Orientation.h"
+#include "geos/geomgraph/DirectedEdge.h"
 
 #include "cereal/archives/binary.hpp"
 #include "cereal/types/memory.hpp"
@@ -28,44 +29,6 @@
 // http://pcjericks.github.io/py-gdalogr-cookbook/geometry.html#create-geometry-from-wkb
 using namespace std;
 
-struct relation_geom
-{
-    int id;
-    int type;
-    int parent;
-    int color;
-    string geom;
-
-    template <class Archive>
-    void save(Archive& ar) const
-    {
-        ar(id, type, parent, color, geom);
-    }
-
-    template <class Archive>
-    void load(Archive& ar)
-    {
-        ar(id, type, parent, color, geom);
-    }
-};
-
-struct s_geom
-{
-    string geom_type;
-    vector<relation_geom> v_geom;
-
-    template <class Archive>
-    void save(Archive& ar) const
-    {
-        ar(geom_type, v_geom);
-    }
-
-    template <class Archive>
-    void load(Archive& ar)
-    {
-        ar(geom_type, v_geom);
-    }
-};
 
 struct edge_relation
 {
@@ -77,32 +40,47 @@ struct edge_relation
     int parent;
     int type;
     int have_relation;
+    string geojson;
     string geom;
     string buffer;
     string left_buff;
     string right_buff;
+    string left_buff_line;
+    string right_buff_line;
+
+    template <class Archive>
+    void save(Archive& ar) const
+    {
+        ar(id, type, parent, color, geojson, geom, buffer, left_buff, right_buff, left_edge, right_edge);
+    }
+
+    template <class Archive>
+    void load(Archive& ar)
+    {
+        ar(id, type, parent, color, geojson, geom, buffer, left_buff, right_buff, left_edge, right_edge);
+    }
 
     edge_relation()
     {
         have_relation = 0;
     }
+};
 
-    edge_relation(const relation_geom& geom)
+struct s_geom
+{
+    string geom_type;
+    vector<edge_relation> v_geom;
+
+    template <class Archive>
+    void save(Archive& ar) const
     {
-        this->id = geom.id;
-        this->color = geom.color;
-        this->type = geom.type;
-        this->parent = geom.parent;
-        this->geom = geom.geom;
+        ar(geom_type, v_geom);
     }
 
-    edge_relation& operator&=(const relation_geom& geom)
+    template <class Archive>
+    void load(Archive& ar)
     {
-        this->id = geom.id;
-        this->color = geom.color;
-        this->type = geom.type;
-        this->parent = geom.parent;
-        return *this;
+        ar(geom_type, v_geom);
     }
 };
 
@@ -219,8 +197,12 @@ void save_relation_to_shp(const vector<edge_relation>& v_relation, const string&
     GDALClose( poDS );
 }
 
-void save_wkt_to_cereal(const s_geom& geom, string& cereal_path)
+void save_wkt_to_cereal(const vector<edge_relation>& v_relation, const string& geom_type, string& cereal_path)
 {
+    s_geom geom;
+    geom.geom_type = geom_type;
+    geom.v_geom.assign(v_relation.begin(), v_relation.end()); 
+
     ofstream out0;
     {
         out0.open(cereal_path, std::ios::binary);
@@ -230,8 +212,10 @@ void save_wkt_to_cereal(const s_geom& geom, string& cereal_path)
     out0.close();
 }
 
-void load_wkt_from_cereal(s_geom& geom, const string& cereal_path)
+void load_wkt_from_cereal( vector<edge_relation>& v_relation, string& geom_type, const string& cereal_path)
 {
+    s_geom geom;
+
     ifstream in0;
     {
         in0.open(cereal_path, ios::in);
@@ -239,9 +223,12 @@ void load_wkt_from_cereal(s_geom& geom, const string& cereal_path)
         archive(geom);
     }
     in0.close();
+
+    geom_type = geom.geom_type;
+    v_relation.assign(geom.v_geom.begin(), geom.v_geom.end()); 
 }
 
-void get_shp_buffer_from_wkt( std::vector<edge_relation>& v_wkt_geom, const double& distance )
+void get_buffer_from_wkt( std::vector<edge_relation>& v_wkt_geom, const double& distance )
 {
     typedef std::unique_ptr<geos::geom::LineString> LineStringAutoPtr;
     typedef geos::geom::LineString* LineStringPtr;
@@ -268,7 +255,7 @@ void get_shp_buffer_from_wkt( std::vector<edge_relation>& v_wkt_geom, const doub
 }
 
 // flag: 0: left buff  1: right buff 
-void get_single_buff_from_wkt( std::vector<edge_relation>& v_wkt_geom, const double& distance, const string& flag = "left" )
+void get_single_buff_line_from_wkt( std::vector<edge_relation>& v_wkt_geom, const double& distance, const string& flag = "left" )
 {
     using geos::operation::buffer::BufferBuilder;
     using geos::operation::buffer::BufferParameters;
@@ -293,23 +280,74 @@ void get_single_buff_from_wkt( std::vector<edge_relation>& v_wkt_geom, const dou
         if(flag == "left"){
             auto geo = reader_.read(x.geom);
             GeomPtr gB(builder.bufferLineSingleSided(geo.get(), distance, true));
-            x.left_buff = gB->toString();
+            x.left_buff_line = gB->toString();
         }
 
         // right-side
         else if(flag == "right"){
             auto geo = reader_.read(x.geom);
             GeomPtr gB(builder.bufferLineSingleSided(geo.get(), distance, false));
+            x.right_buff_line = gB->toString();
+        }
+    }
+}
+
+
+void get_single_buff_from_wkt( std::vector<edge_relation>& v_wkt_geom, const double& distance, const string& flag = "left" )
+{
+    using geos::operation::buffer::BufferBuilder;
+    using geos::operation::buffer::BufferParameters;
+    using geos::algorithm::Orientation;
+    using geos::geom::LineString;
+
+    typedef geos::geom::Geometry::Ptr GeomPtr;
+    geos::io::WKTReader reader_;
+
+    // std::string wkt0("LINESTRING(0 0, 50 -10, 10 10, 0 50, -10 10)");
+
+    BufferParameters params;
+    params.setEndCapStyle(BufferParameters::CAP_FLAT);
+    params.setQuadrantSegments(8);
+    params.setJoinStyle(BufferParameters::JOIN_MITRE);
+    params.setMitreLimit(5.57F);
+    params.setSingleSided(true);
+
+    double dist = distance;
+
+    if(flag == "right"){
+        dist = -distance;
+    }
+    //params.setSingleSided(true); // DO NOT switch for non-areal input, see ticket #633
+    // BufferBuilder builder(params);
+
+    string s;
+    int i = 0;
+
+    for(auto& x: v_wkt_geom){
+        if(flag == "left"){
+            ++i;
+            auto geo = reader_.read(x.geom);
+            // !!! need build erverytime
+            BufferBuilder builder(params);
+            GeomPtr gB(builder.buffer(geo.get(), dist));
+            x.left_buff = gB->toString();
+        }
+
+        // right-side
+        else if(flag == "right"){
+            auto geo = reader_.read(x.geom);
+            BufferBuilder builder(params);
+            GeomPtr gB(builder.buffer(geo.get(), dist));
             x.right_buff = gB->toString();
         }
     }
 }
 
-void delete_contain_geoms( std::vector<relation_geom>& v_origin_geom, const std::vector<relation_geom>& v_buff_geom,  std::vector<relation_geom>& v_geom )
+// TODO: just used for judge, not for real delete
+// TODO: intersection one meter => have error
+void delete_contain_geoms( std::vector<edge_relation>& v_geom)
 {
-    typedef std::unique_ptr<geos::geom::LineString> LineStringAutoPtr;
     typedef geos::geom::LineString* LineStringPtr;
-    typedef geos::geom::Geometry::Ptr GeomAutoPtr;
     typedef geos::geom::Polygon* PolygonPtr;
 
     geos::io::WKTReader reader_;
@@ -317,51 +355,43 @@ void delete_contain_geoms( std::vector<relation_geom>& v_origin_geom, const std:
     LineStringPtr empty_line_;
     PolygonPtr polygon_;
 
-    for(auto&x: v_buff_geom)
+    for(auto&x: v_geom)
     {
-        auto geo = reader_.read(x.geom);
+        auto geo = reader_.read(x.buffer);
         assert(geo != nullptr);
 
         polygon_ = dynamic_cast<PolygonPtr>(geo.get());
         // cout<<polygon_->getGeometryType()<<endl;
 
-        for(auto it=v_origin_geom.begin(); it!=v_origin_geom.end(); ){
+        for(auto it= v_geom.begin(); it!= v_geom.end(); ){
             auto line_ = reader_.read(it->geom);
             empty_line_ = dynamic_cast<LineStringPtr>(line_.get());
             // cout<<empty_line_->toString()<<endl;
 
             if( polygon_->contains(empty_line_) && x.id != it->id ){
                 cout<<"delete line"<<endl;
-                it = v_origin_geom.erase(it);
+                it = v_geom.erase(it);
             }else{
                 ++it;
             }
         }
     }
-    v_geom.insert(v_geom.end(), v_origin_geom.begin(), v_origin_geom.end());
 }
 
-void transform_wkt_from_geojson( const std::vector<relation_geom>& v_geojson_geom, std::vector<relation_geom>& v_wkt_geom )
+void transform_wkt_from_geojson( std::vector<edge_relation>& v_geojson_geom )
 {
     char* wkt = new char[1024];
     for(auto&x: v_geojson_geom)
     {
-        relation_geom data ;
         OGRGeometry *geo;
-        geo = OGRGeometryFactory::createFromGeoJson( x.geom.c_str() );
+        geo = OGRGeometryFactory::createFromGeoJson( x.geojson.c_str() );
         geo->exportToWkt( &wkt );
-        // cout<<wkt<<endl;
-        data.id = x.id;
-        data.geom = wkt;
-        data.type = x.type;
-        data.color = x.color;
-        data.parent = x.parent;
-        v_wkt_geom.push_back(data);
+        x.geom = wkt;
     }
     delete[] wkt;
 }
 
-void load_shp(const string& shp_path){
+void load_shp(const string& shp_path, std::vector<edge_relation>& v_geom ){
     GDALAllRegister();
     GDALDataset   *poDS;
     CPLSetConfigOption("SHAPE_ENCODING","");  //解决中文乱码问题
@@ -377,37 +407,55 @@ void load_shp(const string& shp_path){
     OGRLayer  *poLayer;
     poLayer = poDS->GetLayer(0); //读取层
     OGRFeature *poFeature;
+    OGRGeometry *pGeom;
 
     poLayer->ResetReading();
     int i=0;
 
+    char* wkt = new char[1024];
     for(int i =0;i< poLayer->GetFeatureCount(); i++ ){
-        OGRFeature *poFeature1 = poLayer->GetFeature(205);
-        // OGRGeometry *p1 = poFeature1->GetGeometryRef();
-        // cout<<p1->IsSimple()<<endl;
-    }
+        edge_relation geom;
 
-    while( (poFeature = poLayer->GetNextFeature()) != NULL )
-    {
-        // if(poFeature->GetFieldAsDouble("AREA")<1) continue; //去掉面积过小的polygon
-        // i=i++;
-        // cout<<i<<"  ";
-        OGRFeatureDefn *poFDefn = poLayer->GetLayerDefn();
-        int iField;
-        int n=poFDefn->GetFieldCount(); //获得字段的数目，不包括前两个字段（FID,Shape);
-        for( iField = 0; iField <n; iField++ )
-        {
-            //输出每个字段的值
-            // cout<<poFeature->GetFieldAsString(iField)<<"    ";
-        }
-        // cout<<endl;
-        OGRFeature::DestroyFeature( poFeature );
+        poFeature = poLayer->GetFeature(i);
+        pGeom = poFeature->GetGeometryRef();
+
+        pGeom->exportToWkt(&wkt);
+        geom.geom = wkt;
+
+        geom.id = poFeature->GetFieldAsInteger("id");
+        geom.color = poFeature->GetFieldAsInteger("color");
+
+        geom.type = poFeature->GetFieldAsInteger("type");
+        geom.parent = poFeature->GetFieldAsInteger("parent");
+
+        v_geom.push_back(geom);
     }
+    // OGRFeature::DestroyFeature( poFeature );
+
+    // while( (poFeature = poLayer->GetNextFeature()) != NULL )
+    // {
+    //     geom.id = poFeature->GetFieldAsInteger("id");
+    //     geom.color = poFeature->GetFieldAsInteger("color");
+
+    //     geom.type = poFeature->GetFieldAsInteger("type");
+    //     geom.parent = poFeature->GetFieldAsInteger("parent");
+
+    //     // OGRFeatureDefn *poFDefn = poLayer->GetLayerDefn();
+    //     // int iField;
+    //     // int n=poFDefn->GetFieldCount(); //获得字段的数目，不包括前两个字段（FID,Shape);
+    //     // for( iField = 0; iField <n; iField++ )
+    //     // {
+    //     //     //输出每个字段的值
+    //     //     cout<<poFeature->GetFieldAsString(iField)<<"    ";
+    //     // }
+    //     // cout<<endl;
+    //     OGRFeature::DestroyFeature( poFeature );
+    // }
     GDALClose( poDS );
 }
 
 // create shp from wkt
-void create_shp_from_wkt(const string& shp_path, const string& geom_type, const std::vector<relation_geom>& v_geom_value)
+void create_shp_from_wkt(const string& shp_path, const string& geom_type, const std::vector<edge_relation>& v_geom_value)
 {
     const char *pszDriverName = "ESRI Shapefile";
     GDALDriver *poDriver;
@@ -509,7 +557,7 @@ void create_shp_from_geojson(const string& shp_path, const string& geom_type, co
 
     GDALDataset *poDS;
 
-    poDS = poDriver->Create( "/home/xiaolinz/uisee_src/topo_source/road_topo/shpdata/point_out.shp", 0, 0, 0, GDT_Unknown, NULL );
+    poDS = poDriver->Create( shp_path.c_str(), 0, 0, 0, GDT_Unknown, NULL );
     if( poDS == NULL )
     {
         printf( "Creation of output file failed.\n" );
@@ -557,23 +605,11 @@ void create_shp_from_geojson(const string& shp_path, const string& geom_type, co
         poFeature->SetField( "Name", "aa" );
         OGRGeometry *geo;
         // string wkt = "POINT(108420.73 753808.99);";
-        // string geojson = R"({"type":"LineString","coordinates":[[1016247.90861206,3461292.298148833,12.865576057136304],[1016247.906561,3461292.416155,12.865353],[1016247.8676150001,3461294.3419499995,12.854049],[1016247.8218410001,3461296.2679470006,12.831742],[1016247.763157,3461298.194158,12.817692],[1016247.712768,3461300.1201929997,12.814971],[1016247.685167,3461302.046,12.818],[1016247.659925,3461303.972771,12.82819],[1016247.645309,3461305.899463,12.830226],[1016247.628803,3461307.82531,12.83351],[1016247.603077,3461309.752077,12.837474],[1016247.579599,3461311.678187,12.844675],[1016247.600022,3461313.605616,12.851178],[1016247.622209,3461315.532386,12.858293],[1016247.583385,3461317.458946,12.860758],[1016247.5333280001,3461319.384925,12.852623],[1016247.5367690001,3461321.311692,12.852999],[1016247.55585,3461323.2384630006,12.840665],[1016247.578154,3461325.1658169997,12.83799],[1016247.7065904386,3461329.631826353,0.644264217964249]]})";
+        // string geojson = R"({"type":"LineString","coordinates":[[1016247.90861206,3461292.298148833]})";
         geo = OGRGeometryFactory::createFromGeoJson( x.c_str() );
-        cout<<geo->getGeometryType()<<endl;
+        // cout<<geo->getGeometryType()<<endl;
         // cout<<x<<endl;
         poFeature->SetGeometry(geo);
-
-        // save geom from geojson
-        // OGRFeature* poFeature ;
-        // OGRGeometry* geo ;
-        // OGRSpatialReference *myespEPSG4326osr = new OGRSpatialReference("");
-	    // myespEPSG4326osr->SetWellKnownGeogCS("EPSG:4326");
-
-        // poFeature = OGRFeature::CreateFeature( poLayer->GetLayerDefn() );
-        // poFeature->SetField( "Name", "aa" );
-
-        // OGRGeometryFactory::createFromWkt( x.c_str(), NULL, &geo );
-        // poFeature->SetGeometry( geo );
         
         if( poLayer->CreateFeature( poFeature ) != OGRERR_NONE )
         {
@@ -603,7 +639,7 @@ string transform_dom_to_string(const rapidjson::Value& json_value)
     return buffer.GetString();
 }
 
-void load_geojson_rapidjson(const char* geojson,  string& geom_type, std::vector<relation_geom>& v_geom_value )
+void load_geojson_rapidjson(const char* geojson,  string& geom_type, std::vector<edge_relation>& v_geom_value )
 {
     // string data = R"({ "errorCode":0, "reason":"OK", "result":{"userId":10086,"name":"中国移动"}, "numbers":[110,120,119,911] })";
 
@@ -625,8 +661,8 @@ void load_geojson_rapidjson(const char* geojson,  string& geom_type, std::vector
         if(m.IsArray()){
             const auto& array = m.GetArray();
             for( auto& e: array ){
-                relation_geom data;
-                cout<<transform_dom_to_string(e)<<endl;
+                edge_relation data;
+                // cout<<transform_dom_to_string(e)<<endl;
                 
                 if(e.HasMember("properties")){
                     auto &parent = e["properties"]["parent"];
@@ -649,8 +685,6 @@ void load_geojson_rapidjson(const char* geojson,  string& geom_type, std::vector
                         data.color = -1;
                     }
                 }
-                // cout<<"90909009"<<endl;
-
                 if(e.HasMember("geometry"))
                 {
                     data.id = i;
@@ -658,14 +692,13 @@ void load_geojson_rapidjson(const char* geojson,  string& geom_type, std::vector
                     rapidjson::Value &z = e["geometry"];
                     string geom_value = transform_dom_to_string(z);
 
-                    data.geom = geom_value;
+                    data.geojson = geom_value;
                     v_geom_value.push_back(data);
                     ++i;
                 }
             }
         }
     }
-    cout<<"111111111"<<endl;
 }
 
 // https://blog.csdn.net/fuao/article/details/80950672?utm_source=blogxgwz8
@@ -687,13 +720,13 @@ void load_geojson_parson(const char* geojson )
         JSON_Array* js_feature_list = json_value_get_array(js_feature_list_value);
         int count = json_array_get_count(js_feature_list);
 
-        std::cout<<" feature count "<<count <<std::endl;
+        // std::cout<<" feature count "<<count <<std::endl;
         for(int i=0; i < count; i++)
         {
             JSON_Value *js_node_value =json_array_get_value(js_feature_list, i);
             JSON_Object *js_node = json_value_get_object(js_node_value);
             const char* name = json_object_get_string(js_node, "type");
-            std::cout<<"type name "<< name <<std::endl;
+            // std::cout<<"type name "<< name <<std::endl;
             JSON_Value *js_prop_node_value = json_object_get_value(js_node, "properties");
             JSON_Object *js_prop_node = json_value_get_object(js_prop_node_value);
             int id = json_object_get_number(js_prop_node, "id");
@@ -710,7 +743,7 @@ void load_geojson_parson(const char* geojson )
 
             JSON_Value *js_geo_node_value = json_object_get_value(js_node, "geometry");
 
-            cout<<json_value_get_type(js_geo_node_value)<<endl;
+            // cout<<json_value_get_type(js_geo_node_value)<<endl;
 
             JSON_Object *js_geo_node = json_value_get_object(js_geo_node_value);
 
@@ -737,11 +770,9 @@ void load_geojson_parson(const char* geojson )
 
 }
 
-void delete_short_lane(std::vector<relation_geom>& v_value)
+void delete_short_lane(std::vector<edge_relation>& v_value)
 {
-    typedef std::unique_ptr<geos::geom::LineString> LineStringAutoPtr;
     typedef geos::geom::LineString* LineStringPtr;
-    typedef geos::geom::Geometry::Ptr GeomAutoPtr;
     typedef geos::geom::Polygon* PolygonPtr;
 
     geos::io::WKTReader reader_;
@@ -772,15 +803,6 @@ geos::geom::Geometry::Ptr transform_wkt_to_geos(const string& wkt){
     return geo;
 }
 
-void transform_cereal_to_relation(const std::vector<relation_geom>& v_value, std::vector<edge_relation>& v_geom)
-{
-    for(auto&x: v_value)
-    {
-        edge_relation relation(x);
-        v_geom.push_back(relation);
-    }
-}
-
 void construct_edge_relation( std::vector<edge_relation>& v_geom )
 {
     // vector<edge_relation> v_relation;
@@ -805,7 +827,7 @@ void construct_edge_relation( std::vector<edge_relation>& v_geom )
                 if( inter_geom->getLength() > 1)
                 {
                     x.have_relation = 1;
-                    if( ll->distance( left_buff_line.get()) < 1 ){
+                    if(  left_buff_line->intersects(ll.get() ) ){
                         x.left_edge.push_back(y.id);
                     }else{
                         x.right_edge.push_back(y.id);
@@ -904,77 +926,67 @@ void delete_error_relation( std::vector<edge_relation>& v_geom, const double& di
 
 int main()
 {
+    string input_shp_path = "/home/xiaolinz/uisee_src/topo_source/data/test_data.shp";
     string shp_path = "/home/xiaolinz/uisee_src/topo_source/data/result.shp";
     string geo_json = "/home/xiaolinz/uisee_src/topo_source/data/lane_edge_fit.geojson";
     string cereal_path = "/home/xiaolinz/uisee_src/topo_source/data/result.bin";
 
-    std::vector<relation_geom> v_geom_value;
-    std::vector<relation_geom> v_wkt_value;
-    std::vector<relation_geom> v_buff_geom;
-    std::vector<relation_geom> v_result_geom;
-    std::vector<geos::geom::LineString*> v_geos_value;
-    string geom_type;
-    //  geojson_file -> geo_string
-    // load_geojson_rapidjson(geo_json.c_str(), geom_type, v_geom_value);
+    std::vector<edge_relation> v_geom;
+    load_shp(input_shp_path, v_geom);
 
-    // create_shp_from_geojson(shp_path, geom_type, v_geom_value);
-    // geo_string -> wkt_string
-    // transform_wkt_from_geojson(v_geom_value, v_wkt_value);
+    // create wkt cereal
+    {
+        string geom_type = "LineString";
 
-    double distance = 0.3 ;
-    // wkt_string -> buffer_string
-    // get_shp_buffer_from_wkt(v_wkt_value, v_buff_geom, distance);
+        //  geojson_file -> string
+        // load_geojson_rapidjson(geo_json.c_str(), geom_type, v_geom);
+        
+        // // geo_string -> wkt_string
+        // transform_wkt_from_geojson(v_geom);
 
-    // wkt + buf -> delete_result_string
-    // delete_contain_geoms(v_wkt_value, v_buff_geom, v_result_geom);
-
-    // result_value -> delete short lane
-    // delete_short_lane( v_result_geom );
-
-    // construct 4m buffer for edge relation
-
-    // get_shp_buffer_from_wkt(v_wkt_value, v_buff_geom, distance);
-    // get_single_buff_from_wkt(v_wkt_value, v_buff_geom, distance, "left");
-
-    geom_type = "LineString";
-    s_geom geom;
-    // geom.geom_type = geom_type;
-    // geom.v_geom.assign(v_result_geom.begin(), v_result_geom.end());   
-
-    
-    // save_wkt_to_cereal(geom, cereal_path); 
+        // // result_value -> delete short lane
+        // delete_short_lane( v_geom );
+        
+        // save_wkt_to_cereal(v_geom, geom_type, cereal_path); 
+    }
 
 
     ////////////////////////////////////////////////////////////////
-
-    load_wkt_from_cereal(geom, cereal_path);
-    
-    // create_shp_from_wkt(shp_path, geom_type, geom.v_geom);
-
-    // geom_type = "Polygon";
-    // create_shp_from_wkt(shp_path, geom_type, v_buff_geom);
-
-    // TODO: make edge relationship 
-    // std::vector<relation_geom> v_double_buff_geom;
-    // std::vector<relation_geom> v_left_buff_geom;
-    // std::vector<relation_geom> v_right_buff_geom;
-
-    std::vector<edge_relation> v_geom;
-
-    distance = 4.5;
-
-    transform_cereal_to_relation(geom.v_geom, v_geom);
-
-    get_shp_buffer_from_wkt( v_geom, distance );
-    get_single_buff_from_wkt( v_geom, distance, "left" );
-    get_single_buff_from_wkt( v_geom, distance, "right" );
-
-    construct_edge_relation(v_geom);
-    delete_error_relation(v_geom, distance);
-
     
 
-    save_relation_to_shp( v_geom, "LineString", shp_path );
+    {
+        // TODO: make edge relationship 
+
+        double distance = 4.5;
+        string geom_type ;
+        // load_wkt_from_cereal(v_geom, geom_type, cereal_path);
+
+        get_buffer_from_wkt( v_geom, distance );
+        // get_single_buff_line_from_wkt( v_geom, distance, "left" );
+        // get_single_buff_line_from_wkt( v_geom, distance, "right" );
+
+        get_single_buff_from_wkt( v_geom, distance, "left" );
+        get_single_buff_from_wkt( v_geom, distance, "right" );
+
+        construct_edge_relation(v_geom);
+        delete_error_relation(v_geom, distance);
+        
+        // save_relation_to_shp( v_geom, "LineString", shp_path );
+    }
+
+    // construct sequence
+    {
+
+
+    }
+
+    // other function
+    {
+        // create_shp_from_geojson(shp_path, geom_type, v_geom_value);
+
+        // geom_type = "Polygon";
+        // create_shp_from_wkt(shp_path, geom_type, v_buff_geom);
+    }
 
     // for(auto&x: v_relation){
     //     cout<<x.id <<":"<<endl;

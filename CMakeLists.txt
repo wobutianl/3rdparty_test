@@ -143,6 +143,7 @@ target_link_libraries(shp PUBLIC
 
     ${PROJECT_NAME}
     libgeos.so
+    # libgeos_c.so
     libgdal.so
     ${Boost_LIBRARIES}
     libpthread.so
