@@ -7,6 +7,8 @@
 #include "parson.h"
 #include "ogr_geometry.h"
 #include <fstream>
+#include <iomanip>
+#include <math.h>
 
 #include "rapidjson/document.h"
 #include "rapidjson/writer.h"
@@ -40,6 +42,11 @@ struct edge_relation
     int parent;
     int type;
     int have_relation;
+    bool found;
+    int orientation; // 1: clock_wise, 2:counter_clock_wise
+    int segment;
+    int direction;
+    int sequence;
     string geojson;
     string geom;
     string buffer;
@@ -63,6 +70,8 @@ struct edge_relation
     edge_relation()
     {
         have_relation = 0;
+        found = false;
+        sequence = -1;
     }
 };
 
@@ -141,6 +150,8 @@ void save_relation_to_shp(const vector<edge_relation>& v_relation, const string&
     OGRFieldDefn right_field ("right", OFTString );
     OGRFieldDefn del_field ("del", OFTString );
 
+    OGRFieldDefn seq_field ("seq", OFTInteger );
+
     poLayer->CreateField( &type_field );
     poLayer->CreateField( &id_field );
     poLayer->CreateField( &parent_field );
@@ -150,7 +161,7 @@ void save_relation_to_shp(const vector<edge_relation>& v_relation, const string&
     poLayer->CreateField( &left_field );
     poLayer->CreateField( &right_field );
     poLayer->CreateField( &del_field );
-
+    poLayer->CreateField( &seq_field );
 
     for(const auto&x: v_relation){
         // save geom from wkt
@@ -183,6 +194,7 @@ void save_relation_to_shp(const vector<edge_relation>& v_relation, const string&
         poFeature->SetField( "left", left.c_str() );
         poFeature->SetField( "right", right.c_str() );
         poFeature->SetField( "del", del.c_str() );
+        poFeature->SetField( "seq", x.sequence );
 
         OGRGeometryFactory::createFromWkt( x.geom.c_str(), NULL, &geo );
         poFeature->SetGeometry( geo );
@@ -391,6 +403,28 @@ void transform_wkt_from_geojson( std::vector<edge_relation>& v_geojson_geom )
     delete[] wkt;
 }
 
+//字符串分割函数
+std::vector<std::string> split( std::string str, std::string pattern )
+{
+    std::string::size_type pos;
+    std::vector<std::string> result;
+    str += pattern;//扩展字符串以方便操作
+    int size = str.size();
+
+    for(int i=0; i<size; i++)
+    {
+        pos = str.find( pattern, i );
+        cout<< "pos : "<< pos << endl;
+        if( pos<size )
+        {
+            std::string s=str.substr( i, pos-i );
+            result.push_back(s);
+            i = pos+pattern.size()-1;
+        }
+    }
+    return result;
+}
+
 void load_shp(const string& shp_path, std::vector<edge_relation>& v_geom ){
     GDALAllRegister();
     GDALDataset   *poDS;
@@ -428,6 +462,29 @@ void load_shp(const string& shp_path, std::vector<edge_relation>& v_geom ){
         geom.type = poFeature->GetFieldAsInteger("type");
         geom.parent = poFeature->GetFieldAsInteger("parent");
 
+        string left_edge = poFeature->GetFieldAsString("left");
+        string right_edge = poFeature->GetFieldAsString("right");
+        string del_edges = poFeature->GetFieldAsString("del");
+
+        std::vector<std::string> left = split(left_edge, ",");
+        std::vector<std::string> right = split(right_edge, ",");
+        std::vector<std::string> del = split(del_edges, ",");
+
+        for( auto&x: left){
+            if( x!= "" ){
+                geom.left_edge.push_back( stoi(x) );
+            }
+        }
+        for( auto&x: right){
+            if( x!= "" ){
+                geom.right_edge.push_back( stoi(x) );
+            }
+        }
+        for( auto&x: del){
+            if( x!= "" ){
+                geom.del_edges.insert( stoi(x) );
+            }
+        }
         v_geom.push_back(geom);
     }
     // OGRFeature::DestroyFeature( poFeature );
@@ -924,20 +981,363 @@ void delete_error_relation( std::vector<edge_relation>& v_geom, const double& di
     }
 }
 
+
+void get_line_orientation( std::vector<edge_relation>& v_geom )
+{
+    typedef geos::geom::LineString::Ptr LineStringPtr;
+
+    geos::io::WKTReader reader_;
+    
+    LineStringPtr empty_line_;
+    CoordinateArraySequenceFactory csf; 
+    std::unique_ptr<CoordinateSequence> cs = csf.create(1,2);
+
+    // for(auto it=v_geom.begin(); it!=v_geom.end(); )
+    // {
+    //     auto line_ = reader_.read( it->geom );
+    //     cs->setAt( *(line_.get()->getCoordinates()) , 0 ) ;
+    //     if( geos::algorithm::Orientation::isCCW( cs.get() ) )
+    //     {
+    //         it->orientation = 2;
+    //         cout<<"-----"<<it->orientation<<endl;
+    //     }
+    //     else
+    //     {
+    //         it->orientation = 1;
+    //     }
+    // }
+}
+
+void erase_delid_from_relation(std::vector<edge_relation>& v_geom)
+{
+    for(auto&x: v_geom)
+    {
+        for(const auto&y: x.del_edges){
+            std::remove(std::begin(x.left_edge), std::end(x.left_edge), y);
+            std::remove(std::begin(x.right_edge), std::end(x.right_edge), y) ;
+        }
+    }
+}
+
+void find_all_relation_ids( std::vector<edge_relation>& v_geom, set<int>& find, set<int>& match, vector<set<int> >& result  )
+{
+    if( find.empty() )
+    {
+        auto it = v_geom.begin();
+        for(; it != v_geom.end(); ++it )
+        {
+            if( !it->found ) 
+            {
+                find.insert(it->id);
+                cout<<"id insert into find "<<it->id<<endl;
+
+                if( !match.empty() ) 
+                {
+                    // cout<<"input into result "<<endl;
+                    result.push_back(match);
+                    match.clear();
+                }
+                break;
+            }        
+        }
+        if( it == v_geom.end() ) 
+        {
+            if( !match.empty() ) 
+            {
+                cout<<"input into result "<<endl;
+                result.push_back(match);
+                match.clear();
+            }
+            return;
+        }
+    }
+
+    set<int> temp;
+    for(auto&x: find)
+    {
+        // cout<<"current edge : "<<x<<endl;
+        match.insert(x);
+
+        for(auto&y: v_geom)
+        {
+            if( y.id == x )
+            {
+                // cout<<"----- match"<<endl;
+                y.found = true;
+                // cout<<"left edge size :"<<y.left_edge.size() <<endl;
+                temp.insert( y.left_edge.begin(), y.left_edge.end() );
+                temp.insert( y.right_edge.begin(), y.right_edge.end() );
+                // cout<<"temp size is:"<<temp.size()<<endl;
+
+                break;
+            }
+        }
+        
+    }
+    find.clear();
+    // find.insert(temp.begin(), temp.end() );
+    for(auto&x: temp)
+    {
+        auto it = std::find( match.begin(), match.end(), x);
+        if( it != match.end() ) continue;
+        find.insert(x);
+    }
+    temp.clear();
+    // if( find.empty() ) cout<<" find is empty "<<endl;
+
+    return find_all_relation_ids(v_geom, find, match, result);
+}
+
+void set_segment( std::vector<edge_relation>& v_geom, const vector<set<int> >& result )
+{
+    int i = 1;
+    for(auto&x : result)
+    {
+        for(auto&y: x)
+        {
+            for(auto&z: v_geom)
+            {
+                if(y == z.id)
+                {
+                    z.segment = i;
+                }
+            }
+        }
+        ++i;
+    }
+}
+
+float getAngelOfTwoVector(const Point* sp1, const Point* ep1, const Point* sp2, const Point* ep2)
+{
+    const double PI = 3.141592653; 
+	float theta = atan2(ep1->getX() - sp1->getX(), ep1->getY() - sp1->getY()) - 
+        atan2( ep2->getX() - sp2->getX(), ep2->getY() - sp2->getY() );
+	if (theta > PI)
+		theta -= 2 * PI;
+	if (theta < -PI)
+		theta += 2 * PI;
+ 
+	theta = theta * 180.0 / PI;
+	return theta;
+}
+
+float get_two_vector_angle(const Point* sp1, const Point* ep1, const Point* sp2, const Point* ep2)
+{
+    const double PI = 3.141592653; 
+    double vector1x = sp1->getX() - ep1->getX();
+	double vector1y = sp1->getY() - ep1->getY();
+	double vector2x = sp2->getX() - ep2->getX();
+	double vector2y = sp2->getY() - ep2->getY();
+	double t = ((vector1x)*(vector2x) + (vector1y)*(vector2y))/ (sqrt(pow(vector1x, 2) + 
+                pow(vector1y, 2))*sqrt(pow(vector2x, 2) + pow(vector2y, 2)));
+	cout << "这两个向量的夹角为:" << acos(t)*(180 / PI) << "度" << endl;
+}
+
+// true: same direction, false: other
+bool is_same_direction(const Point* sp1, const Point* ep1, const Point* sp2, const Point* ep2)
+{
+    float angle = getAngelOfTwoVector(sp1, ep1, sp2, ep2);
+    // float angle = get_two_vector_angle( sp1, ep1, sp2, ep2 );
+    cout<<angle<<endl;
+    if( angle <= 90  && angle >= -90 ) return true;
+    return false;
+}
+
+void make_segment_relation( std::vector<edge_relation>& v_geom, std::map<int, std::vector<edge_relation*>>& m_relation )
+{
+    // std::map<int, std::vector<edge_relation*> > m_relation;  <segment: <int*> >
+    for(auto&x: v_geom)
+    {
+        if( m_relation.find(x.segment) == m_relation.end() )
+        {
+            std::vector<edge_relation*> v_edge;
+            v_edge.push_back(&x);
+            m_relation.emplace(x.segment, v_edge);
+        }
+        else
+        {
+            m_relation[x.segment].push_back(&x);
+        }
+    }
+}
+
+void make_direction_relation( std::vector<edge_relation>& v_geom, std::map<int, std::map<int, std::vector<edge_relation*>> >& m_relation )
+{
+    // std::map<int, std::vector<edge_relation*> > m_relation;  <segment: <int*> >
+    const int clock_wise = 1;
+    const int under_clock_wise = 2;
+    for(auto&x: v_geom)
+    {
+        if( m_relation.find(x.segment) == m_relation.end() )
+        {
+            std::map<int, std::vector<edge_relation*> > m_edge;
+            std::vector<edge_relation*> v_dir1_edge;
+            std::vector<edge_relation*> v_dir2_edge;
+            if( x.direction == 1)
+            {
+                v_dir1_edge.push_back(&x);
+            }
+            else
+            {
+                v_dir2_edge.push_back(&x);
+            }
+            m_edge.emplace( 1, v_dir1_edge );
+            m_edge.emplace( 2, v_dir2_edge );
+            
+            m_relation.emplace(x.segment, m_edge);
+        }
+        else
+        {
+            if( x.direction == 1)
+            {
+                m_relation[x.segment][1].push_back(&x);
+            }
+            else
+            {
+                m_relation[x.segment][2].push_back(&x);
+            }
+        }
+    }
+}
+
+void cut_lines_into_two_direction( std::vector<edge_relation>& v_geom )
+{
+    typedef geos::geom::LineString* LineStringPtr;
+    std::map<int, std::vector<edge_relation*> > m_rels;
+
+    make_segment_relation(v_geom, m_rels);
+
+    for(auto&x: m_rels)
+    {
+        if(x.second.size() > 0 )
+        {
+            x.second[0]->direction = 1;
+            geos::geom::Geometry::Ptr base_line = transform_wkt_to_geos(x.second[0]->geom);
+            LineStringPtr base_line_ = dynamic_cast<LineStringPtr>(base_line.get());
+
+            std::unique_ptr<Point> base_p1 = base_line_->getPointN(1) ;
+            std::unique_ptr<Point> base_p2 = base_line_->getPointN(3) ;
+
+            for(auto&z: x.second)
+            {
+                if( x.second[0]->id == z->id ) continue;
+                geos::geom::Geometry::Ptr match_line = transform_wkt_to_geos(z->geom);
+
+                LineStringPtr match_line_ = dynamic_cast<LineStringPtr>(match_line.get());
+
+                std::unique_ptr<Point> match_p1 = match_line_->getPointN(1) ;
+                std::unique_ptr<Point> match_p2 = match_line_->getPointN(3) ;
+
+                if( is_same_direction( base_p1.get(), base_p2.get(), match_p1.get(), match_p2.get() ) )
+                {
+                    z->direction = 1;
+                }
+                else
+                {
+                    z->direction = 2;
+                }
+            }
+        }
+    } 
+}
+
+void make_seq( std::vector<edge_relation>& v_geom, std::vector<std::vector<int> >& v_seq )
+{
+    std::map<int, std::map<int, std::vector<edge_relation*>> > m_relation;
+    make_direction_relation( v_geom, m_relation );
+
+    for( auto&seg: m_relation )
+    {
+        for(auto&x: seg.second)
+        {
+            std::vector<int> seq_info;
+            seq_info.push_back( seg.first);
+            seq_info.push_back(x.first);
+
+            std::vector<int> find;
+            for( auto&y: x.second )
+            {   
+                find.push_back(y->id);
+            }
+
+            int seq = 0;
+            std::vector<int> v_ids;
+            // first time : find all zero edge
+            for( auto&z: x.second )
+            {
+                if( z->right_edge.empty() )
+                {
+                    cout<<"edge "<<z->id<<endl;
+                    z->sequence = seq;
+                    v_ids.insert( v_ids.end(), z->left_edge.begin(), z->left_edge.end() );
+                    // v_ids.insert( v_ids.end(), z->right_edge.begin(), z->right_edge.end() );
+                    find.erase( std::remove( find.begin(), find.end(), z->id ), find.end() );
+                }
+            }
+            // find other edge
+            std::vector<int> left_ids;
+            while( !find.empty() )
+            {
+                cout<<"seq:"<<seq<<endl;
+                ++seq;
+                for( auto&y: v_ids )
+                {
+                    for( auto&z: x.second )
+                    {
+                        if( z->id == y )
+                        {
+                            z->sequence = seq;
+                            // left_ids.insert( v_ids.end(), z->left_edge.begin(), z->left_edge.end() );
+                            if( z->left_edge.size() > 0)
+                            {
+                                left_ids.insert( left_ids.end(), z->left_edge.begin(), z->left_edge.end() );
+                                // v_ids.insert( v_ids.end(), z->right_edge.begin(), z->right_edge.end() );
+                            }
+
+                            find.erase( std::remove( find.begin(), find.end(), z->id ), find.end() );
+                        }
+                    }
+                }
+                v_ids.clear();
+                v_ids.assign(left_ids.begin(), left_ids.end());
+                left_ids.clear();
+            }
+            seq_info.push_back(seq);
+            v_seq.push_back(seq_info);
+        }
+    }
+}
+
+void seq_adjust( std::vector<edge_relation>& v_geom, const std::vector<std::vector<int> >& v_seq)
+{
+    for(auto&x: v_seq)
+    {
+        for(auto&y: v_geom)
+        {
+            if(y.segment == x[0] && y.direction == x[1])
+            {
+                y.sequence = x[2] - y.sequence;
+            }
+        }
+    }
+}
+
 int main()
 {
-    string input_shp_path = "/home/xiaolinz/uisee_src/topo_source/data/test_data.shp";
+    string input_shp_path = "/home/xiaolinz/uisee_src/topo_source/data/test2.shp";
     string shp_path = "/home/xiaolinz/uisee_src/topo_source/data/result.shp";
+    string end_shp_path = "/home/xiaolinz/uisee_src/topo_source/data/result_end.shp";
     string geo_json = "/home/xiaolinz/uisee_src/topo_source/data/lane_edge_fit.geojson";
     string cereal_path = "/home/xiaolinz/uisee_src/topo_source/data/result.bin";
 
     std::vector<edge_relation> v_geom;
-    load_shp(input_shp_path, v_geom);
+    string geom_type = "LineString";
+    double distance = 4.5;
 
+    
+    
     // create wkt cereal
     {
-        string geom_type = "LineString";
-
         //  geojson_file -> string
         // load_geojson_rapidjson(geo_json.c_str(), geom_type, v_geom);
         
@@ -956,14 +1356,10 @@ int main()
 
     {
         // TODO: make edge relationship 
-
-        double distance = 4.5;
-        string geom_type ;
         // load_wkt_from_cereal(v_geom, geom_type, cereal_path);
 
+        load_shp(input_shp_path, v_geom);
         get_buffer_from_wkt( v_geom, distance );
-        // get_single_buff_line_from_wkt( v_geom, distance, "left" );
-        // get_single_buff_line_from_wkt( v_geom, distance, "right" );
 
         get_single_buff_from_wkt( v_geom, distance, "left" );
         get_single_buff_from_wkt( v_geom, distance, "right" );
@@ -971,17 +1367,51 @@ int main()
         construct_edge_relation(v_geom);
         delete_error_relation(v_geom, distance);
         
-        // save_relation_to_shp( v_geom, "LineString", shp_path );
+        // save_relation_to_shp( v_geom, geom_type, shp_path );
     }
 
     // construct sequence
     {
+        /*
+        1: find the relation ids into vector< vector<int> > 
+        2: cut ids into two direction 
+        3: find edge lane mark as zero
+        4: recure relation mark as 1,2,3
+        5: reconstruct sequence
+        */
 
+        set<int> find;
+        set<int> match;
+        vector<set<int> > result;
 
+        // load_shp(shp_path, v_geom);
+        erase_delid_from_relation(v_geom);
+
+        find_all_relation_ids(v_geom , find, match, result);
+
+        set_segment(v_geom, result);
+            
+        cut_lines_into_two_direction(v_geom);
+
+        std::vector<std::vector<int> > v_seq;
+        make_seq(v_geom, v_seq);
+
+        seq_adjust(v_geom, v_seq);
+
+        save_relation_to_shp(v_geom,  geom_type, end_shp_path );
+
+        for( auto&x: v_geom)
+        {
+            cout<<x.id<<"seq: == "<<x.sequence<<endl;
+        }
     }
 
     // other function
     {
+
+        // get_single_buff_line_from_wkt( v_geom, distance, "left" );
+        // get_single_buff_line_from_wkt( v_geom, distance, "right" );
+
         // create_shp_from_geojson(shp_path, geom_type, v_geom_value);
 
         // geom_type = "Polygon";

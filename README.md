@@ -72,3 +72,30 @@ type:
 parent:
 
 
+- make sequence dependence
+1. line direction with right point seq
+2. line connection (optional)
+3. cut particular situation line
+
+- may exists question
+
+/*situation1*/
+--      
+--  --
+------
+in such situation: one have three seq, and another have just two.
+how to set seq ? 
+
+Answer:
+must be cut into two part.
+
+
+/*situation2*/
+----->
+----->
+<-----
+<-----
+----->
+----->
+
+a road have third direction part, code can not deal with such situation
